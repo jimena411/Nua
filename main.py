@@ -11,12 +11,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Nua Colección - API Buscador Visual")
+app = FastAPI(title="Nua Colección API Buscador Visual")
 
-# Configurar CORS para permitir que la web hospedada en biz.ht consuma esta API
+# Configurar CORS para permitir peticiones desde cualquier origen (incluyendo biz.ht)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción se puede restringir a 'http://biz.ht'
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -25,8 +25,8 @@ app.add_middleware(
 # Ruta base del proyecto
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 1. CARGA INICIAL DE DATOS Y MODELOS (Se ejecuta 1 sola vez al arrancar)
-print("Cargando matrices de características y datos de catálogo...")
+# 1. Carga inicial de datos y modelos 
+print("Cargando matrices de características y datos")
 
 try:
     feature_matrix_gris = np.load(os.path.join(BASE_DIR, 'feature_matrix_gris.npy'))
@@ -41,11 +41,15 @@ for col in ['style', 'pattern', 'colors']:
         df[col] = df[col].astype(str).str.strip()
         df[col] = df[col].replace({'nan': 'Unspecified', '': 'Unspecified'}).fillna('Unspecified')
 
-df['color_base'] = df['colors'].str.split().str[0]
+if 'colors' in df.columns:
+    df['color_base'] = df['colors'].str.split().str[0]
+else:
+    df['color_base'] = 'Unspecified'
 
-# Carga de la arquitectura ResNet-50 (extractor de características)
+# Carga de la arquitectura ResNet-50 
 print("Cargando modelo ResNet-50...")
-model = models.resnet50(pretrained=True)
+weights = models.ResNet50_Weights.DEFAULT
+model = models.resnet50(weights=weights)
 model = nn.Sequential(*list(model.children())[:-1])
 model.eval()
 
@@ -63,7 +67,7 @@ transform_color = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-print(" Backend listo para recibir peticiones.")
+print("Backend listo para recibir peticiones.")
 
 
 # 2. ENDPOINTS DE LA API
@@ -76,11 +80,15 @@ def home():
 
 @app.get("/filtros")
 def obtener_filtros():
-    """Devuelve las opciones únicas para poblar los 3 desplegables del sitio web."""
+    """Devuelve las opciones únicas para poblar los desplegables del sitio web."""
+    estilos = sorted(df['style'].unique().tolist()) if 'style' in df.columns else []
+    patrones = sorted(df['pattern'].unique().tolist()) if 'pattern' in df.columns else []
+    colores = sorted(df['color_base'].unique().tolist()) if 'color_base' in df.columns else []
+
     return {
-        "estilos": ["Todos"] + sorted(df['style'].unique().tolist()),
-        "patrones": ["Todos"] + sorted(df['pattern'].unique().tolist()),
-        "colores": ["Todos"] + sorted(df['color_base'].unique().tolist())
+        "estilos": ["Todos"] + estilos,
+        "patrones": ["Todos"] + patrones,
+        "colores": ["Todos"] + colores
     }
 
 
@@ -96,7 +104,6 @@ async def buscar_coincidencias(
     de Trama/Estructura y los 10 mejores de Color/Diseño.
     """
     try:
-        # Lectura de la imagen enviada
         contents = await file.read()
         img = Image.open(io.BytesIO(contents)).convert('RGB')
     except Exception:
@@ -104,11 +111,11 @@ async def buscar_coincidencias(
 
     # Filtrado previo según los 3 desplegables
     condicion = pd.Series([True] * len(df))
-    if estilo != "Todos":
+    if estilo != "Todos" and 'style' in df.columns:
         condicion = condicion & (df['style'] == estilo)
-    if patron != "Todos":
+    if patron != "Todos" and 'pattern' in df.columns:
         condicion = condicion & (df['pattern'] == patron)
-    if color != "Todos":
+    if color != "Todos" and 'color_base' in df.columns:
         condicion = condicion & (df['color_base'] == color)
 
     indices_validos = df[condicion].index.values
@@ -123,13 +130,13 @@ async def buscar_coincidencias(
 
     # Extracción de vectores con ResNet-50
     with torch.no_grad():
-        q_v_gris = model(torch.unsqueeze(img_gris_t, 0)).flatten().numpy().reshape(1, -1)
-        q_v_color = model(torch.unsqueeze(img_color_t, 0)).flatten().numpy().reshape(1, -1)
+        q_v_gris = model(torch.unsqueeze(img_gris_t, 0)).squeeze().numpy().reshape(1, -1)
+        q_v_color = model(torch.unsqueeze(img_color_t, 0)).squeeze().numpy().reshape(1, -1)
 
-    # Definir el top K (máximo 10 resultados o el número de coincidencias disponibles)
+    # Definir el top K 
     top_k = min(10, len(indices_validos))
 
-    # A) Similitud para Estructura / Trama (Grayscale)
+    # A) Similitud para Estructura (Grayscale)
     sim_gris = cosine_similarity(q_v_gris, feature_matrix_gris[indices_validos]).flatten()
     top_gris_local = sim_gris.argsort()[-top_k:][::-1]
     top_10_gris_indices = indices_validos[top_gris_local]
@@ -137,15 +144,15 @@ async def buscar_coincidencias(
     res_estructura = [
         {
             "articulo": str(df.iloc[i]['articulo']),
-            "style": str(df.iloc[i]['style']),
-            "pattern": str(df.iloc[i]['pattern']),
-            "colors": str(df.iloc[i]['colors']),
+            "style": str(df.iloc[i].get('style', 'Unspecified')),
+            "pattern": str(df.iloc[i].get('pattern', 'Unspecified')),
+            "colors": str(df.iloc[i].get('colors', 'Unspecified')),
             "imagen_url": f"http://biz.ht/{df.iloc[i]['tumb']}"
         }
         for i in top_10_gris_indices
     ]
 
-    # B) Similitud para Diseño / Color (RGB)
+    # B) Similitud para Diseño (Color)
     sim_color = cosine_similarity(q_v_color, feature_matrix_color[indices_validos]).flatten()
     top_color_local = sim_color.argsort()[-top_k:][::-1]
     top_10_color_indices = indices_validos[top_color_local]
@@ -153,9 +160,9 @@ async def buscar_coincidencias(
     res_diseno = [
         {
             "articulo": str(df.iloc[i]['articulo']),
-            "style": str(df.iloc[i]['style']),
-            "pattern": str(df.iloc[i]['pattern']),
-            "colors": str(df.iloc[i]['colors']),
+            "style": str(df.iloc[i].get('style', 'Unspecified')),
+            "pattern": str(df.iloc[i].get('pattern', 'Unspecified')),
+            "colors": str(df.iloc[i].get('colors', 'Unspecified')),
             "imagen_url": f"http://biz.ht/{df.iloc[i]['tumb']}"
         }
         for i in top_10_color_indices
