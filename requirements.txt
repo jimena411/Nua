@@ -7,3 +7,4 @@ pandas
 numpy
 pillow
 python-multipart
+scikit-learn
