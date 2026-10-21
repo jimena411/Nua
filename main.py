@@ -13,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Nua Colección - API Buscador Visual")
 
-# Configurar CORS para permitir que la web hospedada en biz.ht consuma esta API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,24 +21,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ruta base del proyecto
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 1. CARGA INICIAL DE DATOS Y MODELOS (Se ejecuta 1 sola vez al arrancar)
-print("Cargando matrices de características y datos de catálogo...")
+print("Cargando matrices de características y catálogo...")
 
-# Cargar archivos de datos de forma directa
+# Carga segura del catálogo (busca df_limpio.csv o textiles.csv)
+csv_limpio = os.path.join(BASE_DIR, 'df_limpio.csv')
+csv_textiles = os.path.join(BASE_DIR, 'textiles.csv')
+
+if os.path.exists(csv_limpio):
+    df = pd.read_csv(csv_limpio)
+elif os.path.exists(csv_textiles):
+    df = pd.read_csv(csv_textiles)
+else:
+    raise FileNotFoundError("No se encontró ni 'df_limpio.csv' ni 'textiles.csv' en la raíz del proyecto.")
+
+# Carga de matrices NumPy
 feature_matrix_gris = np.load(os.path.join(BASE_DIR, 'feature_matrix_gris.npy'))
 feature_matrix_color = np.load(os.path.join(BASE_DIR, 'feature_matrix_color.npy'))
 
-# Carga de catálogo (si existe df_limpio.csv lo usa, si no usa textiles.csv)
-csv_path = os.path.join(BASE_DIR, 'df_limpio.csv')
-if not os.path.exists(csv_path):
-    csv_path = os.path.join(BASE_DIR, 'textiles.csv')
+# Ajuste automático por si el CSV tiene más filas que las matrices numpy (1784)
+if len(df) > len(feature_matrix_gris):
+    df = df.iloc[:len(feature_matrix_gris)].copy()
 
-df = pd.read_csv(csv_path)
-
-# Limpieza y preparación de filtros en memoria
+# Limpieza de columnas en memoria
 for col in ['style', 'pattern', 'colors']:
     if col in df.columns:
         df[col] = df[col].astype(str).str.strip()
@@ -50,14 +55,13 @@ if 'colors' in df.columns:
 else:
     df['color_base'] = 'Unspecified'
 
-# Carga de la arquitectura ResNet-50 (Sintaxis moderna)
+# Carga de ResNet-50 en CPU
 print("Cargando modelo ResNet-50...")
 weights = models.ResNet50_Weights.DEFAULT
 model = models.resnet50(weights=weights)
 model = nn.Sequential(*list(model.children())[:-1])
 model.eval()
 
-# Transformaciones de imagen
 transform_patron = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.Grayscale(num_output_channels=3),
@@ -74,17 +78,13 @@ transform_color = transforms.Compose([
 print("Backend listo para recibir peticiones.")
 
 
-# 2. ENDPOINTS DE LA API
-
 @app.get("/")
 def home():
-    """Endpoint de comprobación para verificar que la API está activa."""
     return {"status": "ok", "message": "API de Buscador Visual Nua Colección activa."}
 
 
 @app.get("/filtros")
 def obtener_filtros():
-    """Devuelve las opciones únicas para poblar los 3 desplegables del sitio web."""
     estilos = sorted(df['style'].unique().tolist()) if 'style' in df.columns else []
     patrones = sorted(df['pattern'].unique().tolist()) if 'pattern' in df.columns else []
     colores = sorted(df['color_base'].unique().tolist()) if 'color_base' in df.columns else []
@@ -103,10 +103,6 @@ async def buscar_coincidencias(
     patron: str = Form("Todos"),
     color: str = Form("Todos")
 ):
-    """
-    Recibe la muestra del usuario + los 3 filtros y devuelve los 10 mejores resultados 
-    de Trama/Estructura y los 10 mejores de Color/Diseño.
-    """
     try:
         contents = await file.read()
         img = Image.open(io.BytesIO(contents)).convert('RGB')
